@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>モンスト反射ルート試作</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#111;color:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Kaku Gothic ProN",sans-serif}
+header{padding:14px 12px;background:#202020;font-weight:700;font-size:18px}
+main{padding:10px;max-width:900px;margin:auto}
+.panel{background:#242424;border:1px solid #444;border-radius:12px;padding:10px;margin-bottom:10px}
+button,.filelabel{border:0;border-radius:9px;padding:11px 13px;background:#ffcf35;color:#171717;font-weight:700;font-size:14px}
+button.secondary{background:#555;color:white}button.active{background:#ff8a00;color:#111}
+input[type=file]{display:none}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.small{font-size:12px;color:#ccc;line-height:1.5;margin-top:8px}
+#status{font-size:13px;color:#9ee7a2;margin-top:8px;min-height:18px}
+#stage{width:100%;background:#050505;border-radius:10px;overflow:hidden;touch-action:none}
+canvas{display:block;width:100%;height:auto;touch-action:none}
+label{font-size:13px;color:#ddd}
+input[type=number]{width:74px;padding:8px;border-radius:7px;border:1px solid #777;background:#111;color:white;font-size:16px}
+input[type=range]{width:min(260px,65vw);vertical-align:middle}
+#preview{display:none}
+</style>
+
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#202020">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="反射ルート">
+<link rel="apple-touch-icon" href="./icons/icon-180.png">
+</head>
+<body>
+<header>モンスト反射ルート試作ツール</header>
+<main>
+ <section class="panel">
+  <div class="controls">
+   <label class="filelabel" for="imageFile">スクショを読み込む</label>
+   <input id="imageFile" type="file" accept="image/*">
+   <button id="reset" class="secondary">画像をクリア</button>
+  </div>
+  <div id="status">まずスクショを読み込んでね。</div>
+  <div class="small">iPhoneの場合は「写真ライブラリ」から画像を選択してください。読み込み後、下の盤面に表示されます。</div>
+ </section>
+ <section class="panel">
+  <div class="controls">
+   <button id="ballMode" class="active">① 球の位置を指定</button>
+   <button id="aimMode" class="secondary">② 引っ張って狙う</button>
+   <button id="obMode" class="secondary">障害物を追加</button>
+   <button id="undo" class="secondary">障害物を1つ戻す</button>
+  </div>
+  <div class="controls" style="margin-top:10px">
+   <label>角度 <input id="angle" type="number" min="0" max="359" value="45"> °</label>
+   <input id="angleRange" type="range" min="0" max="359" value="45">
+   <label>反射回数 <input id="bounces" type="number" min="0" max="50" value="10"></label>
+  </div>
+  <div class="small">球の位置をタップして指定。狙うときは球を押して、飛ばしたい方向と反対へ引っ張って離します。障害物モードでは盤面上をドラッグして四角形を登録できます。</div>
+ </section>
+ <section id="stage"><canvas id="canvas" width="720" height="1280"></canvas></section>
+ <div class="small">※反射線は画面端と手動登録した四角形を使った簡易予測です。モンスト内の敵判定・ギミック・実際の当たり判定や友情コンボ等は再現しません。</div>
+</main>
+<script>
+(function(){
+const fileInput=document.getElementById('imageFile'), canvas=document.getElementById('canvas'), ctx=canvas.getContext('2d',{alpha:false});
+const status=document.getElementById('status'), angleInput=document.getElementById('angle'), angleRange=document.getElementById('angleRange'), bounceInput=document.getElementById('bounces');
+let img=null, ball=null, angle=45, bounceMax=10, mode='ball', obstacles=[], dragStart=null, dragNow=null, addingRect=null;
+function say(s){status.textContent=s}
+function setMode(m){mode=m;[['ball','ballMode'],['aim','aimMode'],['ob','obMode']].forEach(([v,id])=>{const b=document.getElementById(id);b.className=(m===v?'active':'secondary')})}
+function fitImage(image){
+ const maxW=900,maxH=1600,scale=Math.min(1,maxW/image.naturalWidth,maxH/image.naturalHeight);
+ canvas.width=Math.max(1,Math.round(image.naturalWidth*scale));
+ canvas.height=Math.max(1,Math.round(image.naturalHeight*scale));
+ img=image; ball=null; obstacles=[]; angle=45; angleInput.value=45; angleRange.value=45;
+ draw(); say('読み込み成功！盤面を表示しました。球の中心をタップしてね。');
+}
+function draw(){
+ ctx.fillStyle='#080808';ctx.fillRect(0,0,canvas.width,canvas.height);
+ if(img)ctx.drawImage(img,0,0,canvas.width,canvas.height);
+ obstacles.forEach(o=>{ctx.fillStyle='rgba(255,80,40,.20)';ctx.strokeStyle='#ff7043';ctx.lineWidth=Math.max(2,canvas.width/350);ctx.fillRect(o.x,o.y,o.w,o.h);ctx.strokeRect(o.x,o.y,o.w,o.h)});
+ if(addingRect){ctx.strokeStyle='#ffe082';ctx.lineWidth=3;ctx.setLineDash([8,5]);ctx.strokeRect(addingRect.x,addingRect.y,addingRect.w,addingRect.h);ctx.setLineDash([])}
+ if(ball){ctx.beginPath();ctx.arc(ball.x,ball.y,Math.max(8,canvas.width*.012),0,Math.PI*2);ctx.fillStyle='#ffdf32';ctx.fill();ctx.strokeStyle='#111';ctx.lineWidth=3;ctx.stroke();drawPath()}
+}
+function drawPath(){
+ const rad=angle*Math.PI/180, dx=Math.cos(rad),dy=-Math.sin(rad);
+ let x=ball.x,y=ball.y,vx=dx,vy=dy;
+ ctx.beginPath();ctx.moveTo(x,y);
+ const margin=2;
+ for(let i=0;i<Math.max(0,Math.min(50,bounceMax));i++){
+  let t=Infinity,hit='';
+  if(vx>0){let q=(canvas.width-margin-x)/vx;if(q>0&&q<t){t=q;hit='r'}}
+  if(vx<0){let q=(margin-x)/vx;if(q>0&&q<t){t=q;hit='l'}}
+  if(vy>0){let q=(canvas.height-margin-y)/vy;if(q>0&&q<t){t=q;hit='b'}}
+  if(vy<0){let q=(margin-y)/vy;if(q>0&&q<t){t=q;hit='t'}}
+  obstacles.forEach(o=>{
+   // approximate ray vs rectangle entry
+   let tx1=(o.x-x)/vx,tx2=(o.x+o.w-x)/vx,ty1=(o.y-y)/vy,ty2=(o.y+o.h-y)/vy;
+   let txmin=Math.min(tx1,tx2),txmax=Math.max(tx1,tx2),tymin=Math.min(ty1,ty2),tymax=Math.max(ty1,ty2);
+   let enter=Math.max(txmin,tymin),leave=Math.min(txmax,tymax);
+   if(leave>=Math.max(0,enter)&&enter>0&&enter<t){t=enter;hit=(txmin>tymin?'x':'y')}
+  });
+  if(!isFinite(t))break;
+  x+=vx*t;y+=vy*t;ctx.lineTo(x,y);
+  if(hit==='r'||hit==='l'||hit==='x')vx=-vx;
+  if(hit==='t'||hit==='b'||hit==='y')vy=-vy;
+  x+=vx*.5;y+=vy*.5;
+ }
+ ctx.strokeStyle='#ff3030';ctx.lineWidth=Math.max(3,canvas.width/240);ctx.lineCap='round';ctx.stroke();
+}
+function coords(e){const r=canvas.getBoundingClientRect();return{x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height}}
+fileInput.addEventListener('change',()=>{
+ const f=fileInput.files&&fileInput.files[0];if(!f)return;
+ if(!f.type.startsWith('image/')){say('画像ファイルを選択してください。');return}
+ say('画像を読み込み中…');
+ const reader=new FileReader();
+ reader.onerror=()=>say('読み込みに失敗しました。写真アプリから画像を選び直してください。');
+ reader.onload=()=>{const image=new Image();image.onload=()=>fitImage(image);image.onerror=()=>say('画像を開けませんでした。別のスクショで試してください。');image.src=reader.result};
+ reader.readAsDataURL(f);
+});
+document.getElementById('reset').onclick=()=>{img=null;ball=null;obstacles=[];ctx.fillStyle='#080808';ctx.fillRect(0,0,canvas.width,canvas.height);say('画像をクリアしました。')};
+document.getElementById('ballMode').onclick=()=>setMode('ball');
+document.getElementById('aimMode').onclick=()=>setMode('aim');
+document.getElementById('obMode').onclick=()=>setMode('ob');
+document.getElementById('undo').onclick=()=>{obstacles.pop();draw()};
+function syncAngle(v){angle=((Math.round(v)%360)+360)%360;angleInput.value=angle;angleRange.value=angle;draw()}
+angleInput.addEventListener('change',()=>syncAngle(Number(angleInput.value)||0));
+angleRange.addEventListener('input',()=>syncAngle(Number(angleRange.value)));
+bounceInput.addEventListener('change',()=>{bounceMax=Math.max(0,Math.min(50,Number(bounceInput.value)||0));bounceInput.value=bounceMax;draw()});
+canvas.addEventListener('pointerdown',e=>{
+ if(!img){say('先にスクショを読み込んでね。');return}
+ const p=coords(e);
+ if(mode==='ball'){ball=p;draw();say('球の位置を設定しました。次は「引っ張って狙う」を選んでね。')}
+ else if(mode==='aim'){
+  if(!ball){say('先に球の位置を指定してね。');return}
+  if(Math.hypot(p.x-ball.x,p.y-ball.y)>Math.max(28,canvas.width*.05)){say('黄色い球の中心付近を押してね。');return}
+  dragStart=ball;dragNow=p;canvas.setPointerCapture(e.pointerId);
+ }else{dragStart=p;addingRect={x:p.x,y:p.y,w:0,h:0};canvas.setPointerCapture(e.pointerId)}
+});
+canvas.addEventListener('pointermove',e=>{
+ if(!dragStart)return;const p=coords(e);
+ if(mode==='aim'){dragNow=p;const dx=ball.x-p.x,dy=ball.y-p.y;if(Math.hypot(dx,dy)>2)syncAngle((Math.atan2(-dy,dx)*180/Math.PI+360)%360)}
+ else if(mode==='ob'){addingRect={x:Math.min(dragStart.x,p.x),y:Math.min(dragStart.y,p.y),w:Math.abs(p.x-dragStart.x),h:Math.abs(p.y-dragStart.y)};draw()}
+});
+function finish(){if(mode==='ob'&&addingRect&&addingRect.w>8&&addingRect.h>8)obstacles.push(addingRect);dragStart=null;dragNow=null;addingRect=null;draw()}
+canvas.addEventListener('pointerup',finish);canvas.addEventListener('pointercancel',finish);
+ctx.fillStyle='#080808';ctx.fillRect(0,0,canvas.width,canvas.height);
+})();
+</script>
+
+<script>
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./service-worker.js").catch(() => {});
+  });
+}
+</script>
+</body></html>
